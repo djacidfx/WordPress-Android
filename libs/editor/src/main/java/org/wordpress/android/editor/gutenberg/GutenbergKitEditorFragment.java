@@ -45,7 +45,6 @@ import org.wordpress.android.util.helpers.MediaFile;
 import org.wordpress.android.util.helpers.MediaGallery;
 import org.wordpress.aztec.IHistoryListener;
 import org.wordpress.gutenberg.GutenbergView;
-import org.wordpress.gutenberg.GutenbergView.ContentChangeListener;
 import org.wordpress.gutenberg.GutenbergView.HistoryChangeListener;
 import org.wordpress.gutenberg.GutenbergView.LogJsExceptionListener;
 import org.wordpress.gutenberg.GutenbergView.OpenMediaLibraryListener;
@@ -82,7 +81,6 @@ public class GutenbergKitEditorFragment extends EditorFragmentAbstract implement
     private boolean mHtmlModeEnabled;
 
     private final LiveTextWatcher mTextWatcher = new LiveTextWatcher();
-    @Nullable private ContentChangeListener mContentChangeListener = null;
     @Nullable private HistoryChangeListener mHistoryChangeListener = null;
     @Nullable private OpenMediaLibraryListener mOpenMediaLibraryListener = null;
     @Nullable private LogJsExceptionListener mOnLogJsExceptionListener = null;
@@ -145,7 +143,7 @@ public class GutenbergKitEditorFragment extends EditorFragmentAbstract implement
             startActivityForResult(intent, requestCode);
             return null;
         });
-        mGutenbergView.setContentChangeListener(mContentChangeListener);
+        mGutenbergView.setContentChangeListener(mTextWatcher::postTextChanged);
         mGutenbergView.setHistoryChangeListener(mHistoryChangeListener);
         mGutenbergView.setOpenMediaLibraryListener(mOpenMediaLibraryListener);
         mGutenbergView.setLogJsExceptionListener(mOnLogJsExceptionListener);
@@ -382,10 +380,6 @@ public class GutenbergKitEditorFragment extends EditorFragmentAbstract implement
         }
     }
 
-    public void onEditorContentChanged(@NonNull ContentChangeListener listener) {
-        mContentChangeListener = listener;
-    }
-
     public void onEditorHistoryChanged(@NonNull HistoryChangeListener listener) {
         mHistoryChangeListener = listener;
     }
@@ -491,7 +485,6 @@ public class GutenbergKitEditorFragment extends EditorFragmentAbstract implement
     public void onDestroy() {
         if (mGutenbergView != null) {
             GutenbergWebViewPool.recycleWebView(mGutenbergView);
-            mContentChangeListener = null;
             mHistoryChangeListener = null;
         }
         super.onDestroy();
