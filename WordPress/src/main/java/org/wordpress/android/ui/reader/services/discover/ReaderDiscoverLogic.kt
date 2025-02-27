@@ -21,6 +21,7 @@ import org.wordpress.android.models.discover.ReaderDiscoverCard
 import org.wordpress.android.models.discover.ReaderDiscoverCard.InterestsYouMayLikeCard
 import org.wordpress.android.models.discover.ReaderDiscoverCard.ReaderPostCard
 import org.wordpress.android.models.discover.ReaderDiscoverCard.ReaderRecommendedBlogsCard
+import org.wordpress.android.ui.bloggingprompts.BloggingPromptsPostTagProvider.Companion.BLOGGING_PROMPT_TAG
 import org.wordpress.android.ui.prefs.AppPrefsWrapper
 import org.wordpress.android.ui.reader.ReaderConstants.JSON_CARDS
 import org.wordpress.android.ui.reader.ReaderConstants.JSON_CARD_DATA
@@ -46,6 +47,8 @@ import org.wordpress.android.ui.reader.services.discover.ReaderDiscoverLogic.Dis
 import org.wordpress.android.ui.reader.services.discover.ReaderDiscoverLogic.DiscoverTasks.REQUEST_MORE
 import org.wordpress.android.util.AppLog
 import org.wordpress.android.util.AppLog.T.READER
+import org.wordpress.android.util.PerAppLocaleManager
+import org.wordpress.android.util.config.ReaderDiscoverNewEndpointFeatureConfig
 import javax.inject.Inject
 
 /**
@@ -57,6 +60,8 @@ class ReaderDiscoverLogic @Inject constructor(
     private val getFollowedTagsUseCase: GetFollowedTagsUseCase,
     private val getDiscoverCardsUseCase: GetDiscoverCardsUseCase,
     private val appPrefsWrapper: AppPrefsWrapper,
+    private val readerDiscoverNewEndpointFeatureConfig: ReaderDiscoverNewEndpointFeatureConfig,
+    private val perAppLocaleManager: PerAppLocaleManager,
 ) {
     enum class DiscoverTasks {
         REQUEST_MORE, REQUEST_FIRST_PAGE
@@ -82,8 +87,17 @@ class ReaderDiscoverLogic @Inject constructor(
     private fun requestDataForDiscover(taskType: DiscoverTasks, resultListener: UpdateResultListener) {
         coroutineScope?.launch {
             val params = HashMap<String, String>()
-            params["tags"] = getFollowedTagsUseCase.get().joinToString { it.tagSlug }
             params["tag_recs_per_card"] = RECOMMENDED_TAGS_COUNT
+
+            // default to requesting the dailyprompt and wordpress tags if the user isn't following any tags,
+            // otherwise pass the user's followed tags. note we filter out the dailyprompt tag when doing
+            // our empty comparison since new users have that tag followed by default.
+            val userTags = getFollowedTagsUseCase.get()
+            if (userTags.filterNot { it.tagSlug == BLOGGING_PROMPT_TAG }.isEmpty()) {
+                params["tags"] = "$BLOGGING_PROMPT_TAG,wordpress"
+            } else {
+                params["tags"] = userTags.joinToString(",") { it.tagSlug }
+            }
 
             when (taskType) {
                 REQUEST_FIRST_PAGE -> {
@@ -116,7 +130,13 @@ class ReaderDiscoverLogic @Inject constructor(
                 AppLog.e(READER, volleyError)
                 resultListener.onUpdateResult(FAILED)
             }
-            WordPress.getRestClientUtilsV2()["read/tags/cards", params, null, listener, errorListener]
+            params["_locale"] = perAppLocaleManager.getCurrentLocaleLanguageCode()
+            val endpoint = if (readerDiscoverNewEndpointFeatureConfig.isEnabled()) {
+                "read/streams/discover"
+            } else {
+                "read/tags/cards"
+            }
+            WordPress.getRestClientUtilsV2().get(endpoint, params, null, listener, errorListener)
         }
     }
 
@@ -139,11 +159,13 @@ class ReaderDiscoverLogic @Inject constructor(
             insertBlogsIntoDb(cards.filterIsInstance<ReaderRecommendedBlogsCard>().map { it.blogs }.flatten())
 
             // Simplify the json. The simplified version is used in the upper layers to load the data from the db.
-            val simplifiedCardsJson = createSimplifiedJson(fullCardsJson)
+            val simplifiedCardsJson = createSimplifiedJson(fullCardsJson, taskType)
             insertCardsJsonIntoDb(simplifiedCardsJson)
 
             val nextPageHandle = parseDiscoverCardsJsonUseCase.parseNextPageHandle(json)
-            appPrefsWrapper.readerCardsPageHandle = nextPageHandle
+            if (nextPageHandle.isNotEmpty()) {
+                appPrefsWrapper.readerCardsPageHandle = nextPageHandle
+            }
 
             if (cards.isEmpty()) {
                 readerTagTableWrapper.clearTagLastUpdated(ReaderTag.createDiscoverPostCardsTag())
@@ -198,28 +220,47 @@ class ReaderDiscoverLogic @Inject constructor(
      * as it's already stored in the db.
      */
     @Suppress("NestedBlockDepth")
-    private fun createSimplifiedJson(cardsJsonArray: JSONArray): JSONArray {
-        var index = 0
-        val simplifiedJson = JSONArray()
+    private fun createSimplifiedJson(cardsJsonArray: JSONArray, discoverTasks: DiscoverTasks): JSONArray {
+        val simplifiedJsonList = mutableListOf<JSONObject>()
+        var firstRecommendationCard: JSONObject? = null
+        val isFirstPage = discoverTasks == REQUEST_FIRST_PAGE
         for (i in 0 until cardsJsonArray.length()) {
             val cardJson = cardsJsonArray.getJSONObject(i)
-            when (cardJson.getString(JSON_CARD_TYPE)) {
+            // We should not have a recommended blogs or interests/tags card as the first element on Discover feed.
+            val cardType = cardJson.optString(JSON_CARD_TYPE, "")
+            val isCardTypeRecommendation =
+                cardType == JSON_CARD_RECOMMENDED_BLOGS || cardType == JSON_CARD_INTERESTS_YOU_MAY_LIKE
+            if (i == 0 && isFirstPage && isCardTypeRecommendation) {
+                firstRecommendationCard = cardJson
+                continue
+            }
+            when (cardType) {
                 JSON_CARD_RECOMMENDED_BLOGS -> {
                     cardJson.optJSONArray(JSON_CARD_DATA)?.let { recommendedBlogsCardJson ->
                         if (recommendedBlogsCardJson.length() > 0) {
-                            simplifiedJson.put(index++, createSimplifiedRecommendedBlogsCardJson(cardJson))
+                            simplifiedJsonList.add(createSimplifiedRecommendedBlogsCardJson(cardJson))
                         }
                     }
                 }
                 JSON_CARD_INTERESTS_YOU_MAY_LIKE -> {
-                    simplifiedJson.put(index++, cardJson)
+                    simplifiedJsonList.add(cardJson)
                 }
                 JSON_CARD_POST -> {
-                    simplifiedJson.put(index++, createSimplifiedPostJson(cardJson))
+                    simplifiedJsonList.add(createSimplifiedPostJson(cardJson))
                 }
             }
         }
-        return simplifiedJson
+        // If we've received a recommended tags or blogs card as the first element,
+        // it should be displayed as the third card.
+        if (firstRecommendationCard != null) {
+            if (simplifiedJsonList.size >=2) {
+                simplifiedJsonList.add(2, firstRecommendationCard)
+            } else {
+                simplifiedJsonList.add(firstRecommendationCard)
+            }
+        }
+
+        return JSONArray(simplifiedJsonList)
     }
 
     /**
