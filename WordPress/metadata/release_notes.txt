@@ -1,5 +1,3 @@
-Block Editor updates:
-- Device keyboard remains when editing text blocks
-- Screen auto-scrolls to newly inserted blocks
-- Unselect blocks by pressing your device’s back button
-- Share different media types to the app at once without crashing
+Just two fixes to the experimental block editor this time:
+1. You can send feedback about the editor while you're using it.
+2. We fixed a bug where the code view didn't work properly
